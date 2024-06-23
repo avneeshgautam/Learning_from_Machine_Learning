@@ -226,6 +226,8 @@ class Decoder(nn.Module):
         # y = 20 x 200 x 512
         y = self.layers(x,y,mask) 
         return y
+
+        
 d_model = 512
 num_heads = 8
 drop_prob = 0.1
