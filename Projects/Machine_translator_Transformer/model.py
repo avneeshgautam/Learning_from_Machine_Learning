@@ -24,7 +24,7 @@ import numpy as np
 #         return out
 
 def get_device():
-    return torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    return torch.device('cuda:1') if torch.cuda.is_available() else torch.device('cpu')
 
 class LayerNormalization(nn.Module):
     def __init__(self, parameters_shape, eps = 1e-5):
@@ -99,8 +99,8 @@ class SentenceEmbedding(nn.Module):
         tokenized = torch.stack(tokenized)
         return tokenized.to(get_device())
     
-    def forward(self, x, end_token=True): # sentence
-        x = self.batch_tokenize(x ,end_token)
+    def forward(self, x, start_token, end_token): # sentence
+        x = self.batch_tokenize(x, start_token, end_token)
         x = self.embedding(x)
         pos = self.position_encoder().to(get_device())
         x = self.dropout(x + pos)
@@ -121,8 +121,10 @@ class MultiHeadAttention(nn.Module):
     def scaled_dot_product(self,q,k,v, mask = None):
         d_k = q.size()[-1]
         scaled = torch.matmul(q, k.transpose(-2,-1)) / math.sqrt(d_k) # [1, 8, 4, 64] * [1, 8, 64, 8] -> [1, 8, 4, 4]
-
+        
+        # import pdb; pdb.set_trace()
         if mask is not None:
+            
             scaled += mask # [1, 8, 4, 4] + [1, 8, 4, 4] -> [1, 8, 4, 4]
         
         attention = F.softmax(scaled, dim=-1)  # apply only on last dimention # [1, 8, 4, 4]
@@ -197,19 +199,19 @@ class MultiHeadCrossAttention(nn.Module):
     
 
 class PositionwiseFeedforward(nn.Module):
-    def __init__(self, d_model, ffn_hidden, drop_prob = 0.1):
+    def __init__(self, d_model, ffn_hidden, drop_prob=0.1):
         super(PositionwiseFeedforward, self).__init__()
-        self.linear1 = nn.Linear(d_model, ffn_hidden)    # 512 X 2048
-        self.linear2 = nn.Linear(ffn_hidden, d_model)    # 2048 X 512
-        self.relu = nn.ReLU()                        # Activation function
-        self.dropout = nn.Dropout(p = drop_prob)    # Dropout
+        self.linear1 = nn.Linear(d_model, ffn_hidden)
+        self.linear2 = nn.Linear(ffn_hidden, d_model)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(p=drop_prob)
 
     def forward(self, x):
-        x = self.linear1(x)     # 1, 4, 512 -> 1, 4, 2048
-        x = self.relu(x)        # Activation function
+        x = self.linear1(x)
+        x = self.relu(x)
         x = self.dropout(x)
-        x = self.linear2(x)    # batch, 4, 2048 -> batch, 4, 512
-        return x 
+        x = self.linear2(x)
+        return x
     
 class EncoderLayer(nn.Module):
     def __init__(self,d_model, ffn_hidden, num_heads, drop_prob):
@@ -217,11 +219,10 @@ class EncoderLayer(nn.Module):
         self.attention = MultiHeadAttention(d_model = d_model, num_heads = num_heads)
         self.norm1 = LayerNormalization(parameters_shape = [d_model])
         self.dropout1 = nn.Dropout(drop_prob)
-        self.fnn = PositionwiseFeedforward(d_model = d_model, ffn_hidden = ffn_hidden, drop_prob = drop_prob)
+        self.fnn = PositionwiseFeedforward(d_model = d_model, ffn_hidden = ffn_hidden,drop_prob = drop_prob)
         self.norm2 = LayerNormalization(parameters_shape = [d_model])
         self.dropout2 = nn.Dropout(drop_prob)
-
-    def forward(self, x):
+    def forward(self, x, self_attention_mask):
         residual_x = x.clone() # [batch, 4, 512]
         x = self.attention(x, mask = None) # mask = None
         x = self.dropout1(x)    
@@ -230,9 +231,8 @@ class EncoderLayer(nn.Module):
         x = self.fnn(x) 
         x = self.dropout2(x)
         x = self.norm2(x + residual_x)
-
         return x
-
+    
 class SequentialEncoder(nn.Sequential):
     def forward(self, *inputs):
         x, self_attention_mask  = inputs
@@ -251,17 +251,16 @@ class Encoder(nn.Module):
                  language_to_index,
                  START_TOKEN,
                  END_TOKEN, 
-                 PADDING_TOKEN ):
+                 PADDING_TOKEN):
         super().__init__()
         self.sentence_embedding = SentenceEmbedding(max_sequence_length, d_model, language_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN)
-        self.layers = SequentialEncoder(*[EncoderLayer(d_model, ffn_hidden, num_heads, drop_prob) 
+        self.layers = SequentialEncoder(*[EncoderLayer(d_model, ffn_hidden, num_heads, drop_prob)
                                       for _ in range(num_layers)])
 
     def forward(self, x, self_attention_mask, start_token, end_token):
         x = self.sentence_embedding(x, start_token, end_token)
         x = self.layers(x, self_attention_mask)
         return x
-
 
 class DecoderLayer(nn.Module):
     def __init__(self, d_model, ffn_hidden, num_heads, drop_prob):
@@ -345,10 +344,12 @@ class Transformer(nn.Module):
                 PADDING_TOKEN
                 ):
         super().__init__()
-        self.encoder = Encoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers, max_sequence_length, english_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN)
-        self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers, max_sequence_length, hindi_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN)
+        self.encoder = Encoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers, max_sequence_length, 
+                               english_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN)
+        self.decoder = Decoder(d_model, ffn_hidden, num_heads, drop_prob, num_layers, max_sequence_length,
+                                hindi_to_index, START_TOKEN, END_TOKEN, PADDING_TOKEN)
         self.linear = nn.Linear(d_model, hn_vocab_size)
-        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        self.device = torch.device('cuda:1') if torch.cuda.is_available() else torch.device('cpu')
 
     def forward(self, 
                 x, # batch of english sentences
@@ -361,7 +362,8 @@ class Transformer(nn.Module):
                 dec_start_token=False, # We should make this true
                 dec_end_token=False): # x, y are batch of sentences
         x = self.encoder(x, encoder_self_attention_mask, start_token=enc_start_token, end_token=enc_end_token)
-        out = self.decoder(x, y, decoder_self_attention_mask, decoder_cross_attention_mask, start_token=dec_start_token, end_token=dec_end_token)
+        out = self.decoder(x, y, decoder_self_attention_mask, decoder_cross_attention_mask, 
+                           start_token=dec_start_token, end_token=dec_end_token)
         out = self.linear(out)
         return out
 
